@@ -1,0 +1,28 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->string('delivery_city', 100)->nullable()->change();
+            $table->string('delivery_state', 100)->nullable()->change();
+            $table->decimal('delivery_longitude', 11, 8)->nullable()->change();
+            $table->decimal('delivery_latitude', 10, 8)->nullable()->change();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->string('delivery_city', 100)->nullable(false)->change();
+            $table->string('delivery_state', 100)->nullable(false)->change();
+            $table->decimal('delivery_longitude', 11, 8)->nullable(false)->change();
+            $table->decimal('delivery_latitude', 10, 8)->nullable(false)->change();
+        });
+    }
+};

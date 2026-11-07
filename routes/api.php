@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\RatingController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\DatabaseBackupController;
+use App\Http\Controllers\Api\PasswordResetController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -65,10 +66,10 @@ Route::prefix('search')->group(function () {
 // ===========================
 
 // Request password reset link (unauthenticated)
-Route::post('/auth/password/reset-request', [AuthController::class, 'sendResetLink']);
+Route::post('/auth/password/reset-request', [PasswordResetController::class, 'sendResetLink']);
 
 // Handle password reset via email link (unauthenticated)
-Route::post('/auth/password/reset', [AuthController::class, 'resetPassword']);
+Route::post('/auth/password/reset', [PasswordResetController::class, 'resetPassword']);
 
 // Change password while logged in (authenticated)
 // Support all user types by checking all guards

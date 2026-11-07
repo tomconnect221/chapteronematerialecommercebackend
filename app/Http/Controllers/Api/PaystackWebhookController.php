@@ -11,7 +11,6 @@ use App\Models\Order;
 use App\Models\ProductVariant;
 use App\Models\Subadmin;
 use App\Models\User;
-use App\Services\MailConfigService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -167,6 +166,10 @@ class PaystackWebhookController extends Controller
                 'delivery_fee' => $deliveryFee,
                 'total_amount' => $totalAmount,
                 'delivery_address' => $metadata['delivery_address'] ?? '',
+                'delivery_city' => $metadata['delivery_city'] ?? null,
+                'delivery_state' => $metadata['delivery_state'] ?? null,
+                'delivery_longitude' => $metadata['delivery_longitude'] ?? null,
+                'delivery_latitude' => $metadata['delivery_latitude'] ?? null,
                 'delivery_phone' => $metadata['delivery_phone'] ?? '',
                 'payment_reference' => $reference,
                 'payment_status' => 'paid',
@@ -185,7 +188,6 @@ class PaystackWebhookController extends Controller
 
             // Send order confirmation email to customer
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderConfirmationEmail($order));
             } catch (\Exception $e) {
                 Log::warning('Order confirmation email failed to send', [

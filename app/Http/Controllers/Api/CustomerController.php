@@ -18,17 +18,18 @@ use App\Mail\OrderConfirmationEmail;
 use App\Models\Subadmin;
 use App\Models\User;
 use App\Models\Setting;
-use App\Services\MailConfigService;
 use App\Services\NotificationService;
 use App\Services\PaystackService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
 class CustomerController extends Controller
@@ -258,10 +259,10 @@ class CustomerController extends Controller
                 'delivery_fee' => $deliveryFee,
                 'total_amount' => $totalAmount,
                 'delivery_address' => $data['delivery_address'],
-                'delivery_city' => $data['delivery_city'],
-                'delivery_state' => $data['delivery_state'],
-                'delivery_longitude' => $data['delivery_longitude'],
-                'delivery_latitude' => $data['delivery_latitude'],
+                'delivery_city' => $data['delivery_city'] ?? null,
+                'delivery_state' => $data['delivery_state'] ?? null,
+                'delivery_longitude' => $data['delivery_longitude'] ?? null,
+                'delivery_latitude' => $data['delivery_latitude'] ?? null,
                 'delivery_phone' => $data['delivery_phone'] ?? null,
                 'notes' => $data['notes'] ?? null,
                 'items' => $orderItems,
@@ -289,85 +290,191 @@ class CustomerController extends Controller
 
     public function verifyPayment(Request $request, PaystackService $paystack)
     {
-        $reference = $request->input('reference');
-        $verification = $paystack->verifyPayment($reference);
+        $validated = $request->validate([
+            'reference' => ['required', 'string', 'max:255'],
+        ]);
+        $reference = $validated['reference'];
 
-        if (!$verification['status'] || $verification['data']['status'] !== 'success') {
+        try {
+            $verification = $paystack->verifyPayment($reference);
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            Log::error('Paystack payment verification request failed', [
+                'reference' => $reference,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to verify payment at this time.',
+            ], 502);
+        }
+
+        $paymentData = is_array($verification) ? ($verification['data'] ?? null) : null;
+        if (
+            !is_array($verification)
+            || !($verification['status'] ?? false)
+            || !is_array($paymentData)
+            || ($paymentData['status'] ?? null) !== 'success'
+        ) {
+            Log::warning('Paystack payment verification was unsuccessful', [
+                'reference' => $reference,
+                'message' => is_array($verification) ? ($verification['message'] ?? null) : null,
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Payment verification failed',
             ], 400);
         }
 
-        $metadata = $verification['data']['metadata'];
-
-        // Create order using metadata (use stored unit_price/total_price/discount_amount when present)
-        $customerId = $metadata['customer_id'];
-        $subtotal = 0;
-        $orderItems = [];
-
-        foreach ($metadata['items'] as $itemIndex => $item) {
-            $product = Product::findOrFail($item['product_id']);
-            $variant = $this->resolveOrderVariant($product, $item, $itemIndex);
-            if ($variant && $variant->stock_quantity < $item['quantity']) {
-                return response()->json([
-                    'success' => false,
-                    'message' => "Insufficient stock for the selected option of {$product->name}.",
-                ], 409);
-            }
-
-            $unitPrice = isset($item['unit_price']) ? (float) $item['unit_price'] : (float) $product->price;
-            $totalPrice = isset($item['total_price']) ? (float) $item['total_price'] : $unitPrice * $item['quantity'];
-            $discountAmount = isset($item['discount_amount']) ? (float) $item['discount_amount'] : 0;
-            $subtotal += $totalPrice;
-
-            $orderItems[] = [
-                'product_id' => $product->id,
-                'product_variant_id' => $variant?->id,
-                'variant_options' => $item['variant_options'] ?? $this->variantSnapshot($variant),
-                'quantity' => $item['quantity'],
-                'unit_price' => $unitPrice,
-                'total_price' => $totalPrice,
-                'discount_amount' => $discountAmount,
-            ];
-
-            if ($variant) {
-                $variant->stock_quantity -= (int) $item['quantity'];
-                $variant->save();
-                $product->stock_quantity -= (int) $item['quantity'];
-                $product->save();
-            } else {
-                $product->decrement('stock_quantity', $item['quantity']);
-            }
-        }
-
-        // Use values from metadata (already calculated during payment initialization)
-        $taxAmount = isset($metadata['tax_amount']) ? floatval($metadata['tax_amount']) : 0;
-        $deliveryFee = isset($metadata['delivery_fee']) ? floatval($metadata['delivery_fee']) : 0;
-        $totalAmount = isset($metadata['total_amount']) ? floatval($metadata['total_amount']) : ($subtotal + $taxAmount + $deliveryFee);
-
-        $order = Order::create([
-            'order_number' => Order::generateOrderNumber(),
-            'customer_id' => $customerId,
-            'branch_id' => $metadata['branch_id'],
-            'subtotal' => $subtotal,
-            'tax_amount' => $taxAmount,
-            'delivery_fee' => $deliveryFee,
-            'total_amount' => $totalAmount,
-            'delivery_address' => $metadata['delivery_address'],
-            'delivery_city' => $metadata['delivery_city'] ?? null,
-            'delivery_state' => $metadata['delivery_state'] ?? null,
-            'delivery_longitude' => $metadata['delivery_longitude'] ?? null,
-            'delivery_latitude' => $metadata['delivery_latitude'] ?? null,
-            'delivery_phone' => $metadata['delivery_phone'] ?? null,
-            'notes' => $metadata['notes'] ?? null,
-            'payment_reference' => $reference,
-            'payment_status' => 'paid',
+        $metadata = $paymentData['metadata'] ?? null;
+        $metadataValidator = Validator::make(is_array($metadata) ? $metadata : [], [
+            'customer_id' => ['required', 'uuid', 'exists:customers,id'],
+            'branch_id' => ['required', 'uuid', 'exists:branches,id'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.product_id' => ['required', 'uuid', 'exists:products,id'],
+            'items.*.quantity' => ['required', 'integer', 'min:1'],
+            'items.*.variant_id' => ['nullable', 'uuid'],
+            'items.*.product_variant_id' => ['nullable', 'uuid'],
+            'items.*.unit_price' => ['nullable', 'numeric', 'min:0'],
+            'items.*.total_price' => ['nullable', 'numeric', 'min:0'],
+            'items.*.discount_amount' => ['nullable', 'numeric', 'min:0'],
+            'tax_amount' => ['nullable', 'numeric', 'min:0'],
+            'delivery_fee' => ['nullable', 'numeric', 'min:0'],
+            'total_amount' => ['nullable', 'numeric', 'min:0'],
+            'delivery_address' => ['required', 'string'],
+            'delivery_city' => ['nullable', 'string', 'max:100'],
+            'delivery_state' => ['nullable', 'string', 'max:100'],
+            'delivery_longitude' => ['nullable', 'numeric', 'between:-180,180'],
+            'delivery_latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'delivery_phone' => ['nullable', 'string', 'max:20'],
+            'notes' => ['nullable', 'string'],
         ]);
 
-        foreach ($orderItems as $item) {
-            $item['order_id'] = $order->id;
-            OrderItem::create($item);
+        if ($metadataValidator->fails()) {
+            Log::error('Verified Paystack payment has invalid order metadata', [
+                'reference' => $reference,
+                'errors' => $metadataValidator->errors()->keys(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Payment was received, but its order details are incomplete. Please contact support.',
+            ], 422);
+        }
+
+        $metadata = $metadataValidator->validated();
+        $customer = Auth::guard('customer-api')->user();
+        if (!$customer || (string) $metadata['customer_id'] !== (string) $customer->getAuthIdentifier()) {
+            Log::warning('Customer attempted to verify a payment for another account', [
+                'reference' => $reference,
+                'customer_id' => $customer?->getAuthIdentifier(),
+                'payment_customer_id' => $metadata['customer_id'],
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'This payment does not belong to the authenticated customer.',
+            ], 403);
+        }
+
+        $result = DB::transaction(function () use ($metadata, $reference) {
+            $existingOrder = Order::where('payment_reference', $reference)->lockForUpdate()->first();
+            if ($existingOrder) {
+                return ['order' => $existingOrder, 'created' => false];
+            }
+
+            $subtotal = 0;
+            $orderItems = [];
+            $products = [];
+
+            foreach ($metadata['items'] as $itemIndex => $item) {
+                $product = Product::whereKey($item['product_id'])->lockForUpdate()->firstOrFail();
+                $variant = $this->resolveOrderVariant($product, $item, $itemIndex);
+                $availableStock = $variant?->stock_quantity ?? $product->stock_quantity;
+                if ($availableStock < $item['quantity']) {
+                    return [
+                        'insufficient_stock' => "Insufficient stock for the selected option of {$product->name}.",
+                    ];
+                }
+
+                $unitPrice = isset($item['unit_price']) ? (float) $item['unit_price'] : (float) $product->price;
+                $totalPrice = isset($item['total_price']) ? (float) $item['total_price'] : $unitPrice * $item['quantity'];
+                $discountAmount = isset($item['discount_amount']) ? (float) $item['discount_amount'] : 0;
+                $subtotal += $totalPrice;
+
+                $orderItems[] = [
+                    'product_id' => $product->id,
+                    'product_variant_id' => $variant?->id,
+                    'variant_options' => $item['variant_options'] ?? $this->variantSnapshot($variant),
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $unitPrice,
+                    'total_price' => $totalPrice,
+                    'discount_amount' => $discountAmount,
+                ];
+                $products[] = ['product' => $product, 'variant' => $variant, 'quantity' => (int) $item['quantity']];
+            }
+
+            foreach ($products as $stockChange) {
+                if ($stockChange['variant']) {
+                    $stockChange['variant']->decrement('stock_quantity', $stockChange['quantity']);
+                }
+                $stockChange['product']->decrement('stock_quantity', $stockChange['quantity']);
+            }
+
+        // Use values from metadata (already calculated during payment initialization)
+            $taxAmount = isset($metadata['tax_amount']) ? (float) $metadata['tax_amount'] : 0;
+            $deliveryFee = isset($metadata['delivery_fee']) ? (float) $metadata['delivery_fee'] : 0;
+            $totalAmount = isset($metadata['total_amount']) ? (float) $metadata['total_amount'] : ($subtotal + $taxAmount + $deliveryFee);
+
+            $order = Order::create([
+                'order_number' => Order::generateOrderNumber(),
+                'customer_id' => $metadata['customer_id'],
+                'branch_id' => $metadata['branch_id'],
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'delivery_fee' => $deliveryFee,
+                'total_amount' => $totalAmount,
+                'delivery_address' => $metadata['delivery_address'],
+                'delivery_city' => $metadata['delivery_city'] ?? null,
+                'delivery_state' => $metadata['delivery_state'] ?? null,
+                'delivery_longitude' => $metadata['delivery_longitude'] ?? null,
+                'delivery_latitude' => $metadata['delivery_latitude'] ?? null,
+                'delivery_phone' => $metadata['delivery_phone'] ?? null,
+                'notes' => $metadata['notes'] ?? null,
+                'payment_reference' => $reference,
+                'payment_status' => 'paid',
+            ]);
+
+            foreach ($orderItems as $item) {
+                $item['order_id'] = $order->id;
+                OrderItem::create($item);
+            }
+
+            return ['order' => $order, 'created' => true];
+        });
+
+        if (isset($result['insufficient_stock'])) {
+            return response()->json([
+                'success' => false,
+                'message' => $result['insufficient_stock'],
+            ], 409);
+        }
+
+        $order = $result['order'];
+        if (!$result['created']) {
+            if ((string) $order->customer_id !== (string) $customer->getAuthIdentifier()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This payment does not belong to the authenticated customer.',
+                ], 403);
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Payment verified and order created successfully',
+                'data' => $order->load(['orderItems.product']),
+            ]);
         }
 
         // Load order relationships for email
@@ -378,7 +485,6 @@ class CustomerController extends Controller
 
         // Send order confirmation email to customer
         try {
-            app(MailConfigService::class)->loadFromDatabase();
             Mail::to($order->customer->email)->send(new OrderConfirmationEmail($order));
         } catch (\Exception $e) {
             Log::warning('Order confirmation email failed to send', [
@@ -507,6 +613,10 @@ class CustomerController extends Controller
                 'delivery_fee' => $deliveryFee,
                 'total_amount' => $totalAmount,
                 'delivery_address' => $metadata['delivery_address'] ?? '',
+                'delivery_city' => $metadata['delivery_city'] ?? null,
+                'delivery_state' => $metadata['delivery_state'] ?? null,
+                'delivery_longitude' => $metadata['delivery_longitude'] ?? null,
+                'delivery_latitude' => $metadata['delivery_latitude'] ?? null,
                 'delivery_phone' => $metadata['delivery_phone'] ?? '',
                 'payment_reference' => $reference,
                 'payment_status' => 'paid',
@@ -525,7 +635,6 @@ class CustomerController extends Controller
 
             // Send order confirmation email to customer
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderConfirmationEmail($order));
             } catch (\Exception $e) {
                 Log::warning('Order confirmation email failed to send', [

@@ -18,7 +18,6 @@ use App\Http\Requests\UpdateSubadminRequest;
 use App\Mail\OrderStatusChangeEmail;
 use App\Mail\RiderAssignmentEmail;
 use App\Services\ProductVariantService;
-use App\Services\MailConfigService;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\Product;
@@ -731,7 +730,7 @@ class AdminController extends Controller
      */
     public function getOrder(string $id): JsonResponse
     {
-        $order = Order::with(['customer', 'branch', 'rider', 'orderItems.product'])->findOrFail($id);
+        $order = Order::with(['customer', 'branch', 'rider', 'orderItems.product.category', 'orderItems.variant'])->findOrFail($id);
 
         return response()->json([
             'success' => true,
@@ -755,7 +754,6 @@ class AdminController extends Controller
         // Send email notification to customer if status changed
         if ($oldStatus !== $newStatus && $order->customer) {
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderStatusChangeEmail($order, $oldStatus, $newStatus));
             } catch (\Exception $e) {
                 Log::warning('Order status change email failed to send', [
@@ -805,7 +803,6 @@ class AdminController extends Controller
 
         // Send email notification to rider
         try {
-            app(MailConfigService::class)->loadFromDatabase();
             Mail::to($rider->email)->send(new RiderAssignmentEmail($order, $rider));
         } catch (\Exception $e) {
             Log::warning('Rider assignment email failed to send', [
@@ -819,7 +816,6 @@ class AdminController extends Controller
         // Also send status change email to customer
         if ($order->customer) {
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderStatusChangeEmail($order, 'ready_for_delivery', 'out_for_delivery'));
             } catch (\Exception $e) {
                 Log::warning('Order status change email failed to send', [
@@ -1139,6 +1135,14 @@ class AdminController extends Controller
             '*.value' => 'nullable|string',
         ]);
 
+        $mailKeys = ['mail_mailer', 'mail_host', 'mail_port', 'mail_username', 'mail_password', 'mail_encryption', 'mail_from_address', 'mail_from_name'];
+        if (collect($validated)->contains(fn ($item) => in_array($item['key'], $mailKeys, true))) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Mail transport settings must be configured in the server environment, not database settings.',
+            ], 422);
+        }
+
         $results = [];
 
         foreach ($validated as $item) {
@@ -1150,35 +1154,18 @@ class AdminController extends Controller
         }
 
         cache()->forget('app_settings');
-        
-        // If mail settings were updated, clear config cache and reload mail config
-        $mailKeys = ['mail_mailer', 'mail_host', 'mail_port', 'mail_username', 'mail_password', 'mail_encryption', 'mail_from_address', 'mail_from_name'];
-        $mailSettingsUpdated = false;
-        foreach ($validated as $item) {
-            if (in_array($item['key'], $mailKeys)) {
-                $mailSettingsUpdated = true;
-                break;
-            }
-        }
-        
-        if ($mailSettingsUpdated) {
-            // Clear config cache
-            cache()->forget('config');
-            
-            // Reload mail configuration from database
-            app(MailConfigService::class)->loadFromDatabase();
-        }
 
         return response()->json([
             'success' => true,
-            'message' => 'Settings saved successfully' . ($mailSettingsUpdated ? ' (Mail config reloaded)' : ''),
+            'message' => 'Settings saved successfully',
             'data' => $results,
         ]);
     }
 
     public function getSettings(): JsonResponse
     {
-        $settings = Setting::all()->pluck('value', 'key');
+        $mailKeys = ['mail_mailer', 'mail_host', 'mail_port', 'mail_username', 'mail_password', 'mail_encryption', 'mail_from_address', 'mail_from_name'];
+        $settings = Setting::whereNotIn('key', $mailKeys)->get()->pluck('value', 'key');
 
         return response()->json([
             'success' => true,

@@ -31,12 +31,12 @@ class CreateOrderRequest extends FormRequest
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
             'items.*.quantity' => 'required|integer|min:1',
 
-            // Required delivery location fields.
+            // Some existing clients only submit a combined delivery address.
             'delivery_address' => 'required|string',
-            'delivery_city' => 'required|string|max:100',
-            'delivery_state' => 'required|string|max:100',
-            'delivery_longitude' => 'required|numeric|between:-180,180',
-            'delivery_latitude' => 'required|numeric|between:-90,90',
+            'delivery_city' => 'nullable|string|max:100',
+            'delivery_state' => 'nullable|string|max:100',
+            'delivery_longitude' => 'nullable|numeric|between:-180,180',
+            'delivery_latitude' => 'nullable|numeric|between:-90,90',
 
             // Optional fields.
             'delivery_phone' => 'nullable|string|max:20',

@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\UpdateProfilePictureRequest;
 use App\Mail\OrderStatusChangeEmail;
 use App\Models\Order;
-use App\Services\MailConfigService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -116,7 +115,6 @@ class RiderController extends Controller
         // Send order status change email (delivered) to customer
         if ($order->customer) {
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderStatusChangeEmail($order, $oldStatus, 'delivered'));
             } catch (\Exception $e) {
                 Log::warning('Order delivered email failed to send', [

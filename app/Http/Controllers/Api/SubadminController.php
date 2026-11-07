@@ -15,7 +15,6 @@ use App\Models\Category;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\Rider;
-use App\Services\MailConfigService;
 use App\Services\ProductVariantService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -473,7 +472,7 @@ class SubadminController extends Controller
     {
         $subadmin = $request->user();
         $order = Order::where('branch_id', $subadmin->branch_id)
-            ->with(['customer', 'rider', 'orderItems.product'])
+            ->with(['customer', 'rider', 'orderItems.product.category', 'orderItems.variant'])
             ->findOrFail($id);
 
         return response()->json([
@@ -499,7 +498,6 @@ class SubadminController extends Controller
         // Send email notification to customer if status changed
         if ($oldStatus !== $newStatus && $order->customer) {
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderStatusChangeEmail($order, $oldStatus, $newStatus));
             } catch (\Exception $e) {
                 Log::warning('Order status change email failed to send', [
@@ -566,7 +564,6 @@ class SubadminController extends Controller
 
         // Send email notification to rider
         try {
-            app(MailConfigService::class)->loadFromDatabase();
             Mail::to($rider->email)->send(new RiderAssignmentEmail($order, $rider));
         } catch (\Exception $e) {
             Log::warning('Rider assignment email failed to send', [
@@ -580,7 +577,6 @@ class SubadminController extends Controller
         // Also send status change email to customer
         if ($order->customer) {
             try {
-                app(MailConfigService::class)->loadFromDatabase();
                 Mail::to($order->customer->email)->send(new OrderStatusChangeEmail($order, 'ready_for_delivery', 'out_for_delivery'));
             } catch (\Exception $e) {
                 Log::warning('Order status change email failed to send', [
